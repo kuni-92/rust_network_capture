@@ -1,37 +1,43 @@
-use std::env;
+extern crate pnet;
 
-use pnet::{datalink::{self, NetworkInterface, Channel::Ethernet}, packet::MutablePacket};
-use pnet::packet::{Packet, ethernet::{EthernetPacket, MutableEthernetPacket}};
+use pnet::packet::{MutablePacket, Packet};
+use pnet::packet::ip::IpNextHeaderProtocols;
+use pnet::transport::TransportChannelType::Layer4;
+use pnet::transport::TransportProtocol::Ipv4;
+use pnet::transport::{transport_channel, udp_packet_iter};
+use pnet::packet::udp::MutableUdpPacket;
 
 fn main() {
-    let net_interface = env::args().nth(1).unwrap();
+    let  protocol = Layer4(Ipv4(IpNextHeaderProtocols::Test1));
 
-    let interfaces = datalink::interfaces();
-    let interface_match = |interface: &NetworkInterface| interface.name == net_interface;
-    let interface =interfaces.into_iter().filter(interface_match).next().unwrap();
-    println!("Interface: {}", interface.name);
-
-    let (mut tx, mut rx) = match datalink::channel(&interface, Default::default()) {
-        Ok(Ethernet(tx, rx)) => (tx, rx),
-        Ok(_) => panic!("Not ethernet handler."),
-        Err(e) => panic!("Create ethernet handle error. {}", e),
+    let(mut tx, mut rx) = match transport_channel(4096, protocol) {
+        Ok((tx, rx)) => (tx, rx),
+        Err(e) => panic!("An error occurred when creating the transport channel: {}", e),
     };
 
+    let mut iter = udp_packet_iter(&mut rx);
+
     loop {
-        match rx.next() {
-            Ok(packet) => {
-                let packet = EthernetPacket::new(packet).unwrap();
+        println!("Start capture");
+        match iter.next() {
+            Ok((packet, addr)) => {
+                let mut vec: Vec<u8> = vec![0; packet.packet().len()];
+                println!("Receve packet: {:?}", vec);
+                let mut new_packet = MutableUdpPacket::new(&mut vec[..]).unwrap();
+                
+                new_packet.clone_from(&packet);
 
-                tx.build_and_send(1, packet.packet().len(),
-                &mut |new_packet| {
-                    let mut new_packet = MutableEthernetPacket::new(new_packet).unwrap();
-                    new_packet.clone_from(&packet);
+                new_packet.set_source(packet.get_destination());
+                new_packet.set_destination(packet.get_source());
 
-                    new_packet.set_source(packet.get_destination());
-                    new_packet.set_destination(packet.get_source());
-                });
-            },
-            Err(e) => panic!("ethernet read error. {}", e),
+                match tx.send_to(new_packet, addr) {
+                    Ok(n) => assert_eq!(n, packet.packet().len()),
+                    Err(e) => panic!("failed to send packet: {}", e),
+                }
+            }
+            Err(e) => {
+                panic!("An error occurred while reading: {}", e);
+            }
         }
     }
 }
